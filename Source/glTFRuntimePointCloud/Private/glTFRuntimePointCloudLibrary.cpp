@@ -759,3 +759,195 @@ ULidarPointCloud* UglTFRuntimePointCloudLibrary::LoadPointCloudFromPCD(UglTFRunt
 
 	return ULidarPointCloud::CreateFromData(Points, false);
 }
+
+ULidarPointCloud* UglTFRuntimePointCloudLibrary::LoadPointCloudFromPLY(UglTFRuntimeAsset* Asset)
+{
+	if (!Asset)
+	{
+		return nullptr;
+	}
+
+	const TArray64<uint8>& Blob = Asset->GetParser()->GetBlob();
+	if (Blob.Num() == 0)
+	{
+		return nullptr;
+	}
+
+	FString HeaderStr;
+	int64 DataStartIndex = -1;
+
+	// Locate the end of the PLY header
+	for (int64 Index = 0; Index < Blob.Num() - 10; Index++)
+	{
+		if (Blob[Index] == 'e' && Blob[Index + 1] == 'n' && Blob[Index + 2] == 'd' && Blob[Index + 3] == '_' &&
+			Blob[Index + 4] == 'h' && Blob[Index + 5] == 'e' && Blob[Index + 6] == 'a' && Blob[Index + 7] == 'd' &&
+			Blob[Index + 8] == 'e' && Blob[Index + 9] == 'r')
+		{
+			int64 LineEndIndex = Index + 10;
+			while (LineEndIndex < Blob.Num() && (Blob[LineEndIndex] == '\r' || Blob[LineEndIndex] == '\n' || Blob[LineEndIndex] == ' '))
+			{
+				LineEndIndex++;
+			}
+			DataStartIndex = LineEndIndex;
+			HeaderStr = FString(Index, reinterpret_cast<const ANSICHAR*>(Blob.GetData()));
+			break;
+		}
+	}
+
+	if (DataStartIndex < 0)
+	{
+		return nullptr;
+	}
+
+	TArray<FString> HeaderLines;
+	HeaderStr.ParseIntoArrayLines(HeaderLines);
+
+	bool bIsBinary = false;
+	int64 VertexCount = 0;
+
+	struct FPLYProperty
+	{
+		FString Name;
+		int32 Size;
+		int32 Offset;
+	};
+
+	TArray<FPLYProperty> VertexProperties;
+	int32 VertexStride = 0;
+	bool bInVertexElement = false;
+
+	// Parse the header to map properties and layout
+	for (const FString& Line : HeaderLines)
+	{
+		TArray<FString> Tokens;
+		Line.ParseIntoArrayWS(Tokens);
+		if (Tokens.Num() == 0) continue;
+
+		if (Tokens[0] == TEXT("format"))
+		{
+			if (Tokens.Num() > 1 && Tokens[1].Contains(TEXT("binary")))
+			{
+				bIsBinary = true;
+			}
+		}
+		else if (Tokens[0] == TEXT("element"))
+		{
+			if (Tokens.Num() > 2 && Tokens[1] == TEXT("vertex"))
+			{
+				VertexCount = FCString::Atoi64(*Tokens[2]);
+				bInVertexElement = true;
+			}
+			else
+			{
+				bInVertexElement = false;
+			}
+		}
+		else if (Tokens[0] == TEXT("property") && bInVertexElement)
+		{
+			if (Tokens.Num() >= 3)
+			{
+				FPLYProperty Prop;
+				FString Type = Tokens[1];
+				Prop.Name = Tokens[2];
+
+				if (Type == TEXT("float") || Type == TEXT("float32") || Type == TEXT("int") || Type == TEXT("int32") || Type == TEXT("uint") || Type == TEXT("uint32")) Prop.Size = 4;
+				else if (Type == TEXT("double") || Type == TEXT("float64")) Prop.Size = 8;
+				else if (Type == TEXT("uchar") || Type == TEXT("uint8") || Type == TEXT("char") || Type == TEXT("int8")) Prop.Size = 1;
+				else if (Type == TEXT("ushort") || Type == TEXT("uint16") || Type == TEXT("short") || Type == TEXT("int16")) Prop.Size = 2;
+				else Prop.Size = 0;
+
+				Prop.Offset = VertexStride;
+				VertexStride += Prop.Size;
+				VertexProperties.Add(Prop);
+			}
+		}
+	}
+
+	if (VertexCount <= 0 || VertexProperties.Num() == 0)
+	{
+		return nullptr;
+	}
+
+	int32 OffsetX = -1, OffsetY = -1, OffsetZ = -1;
+	int32 OffsetR = -1, OffsetG = -1, OffsetB = -1;
+
+	for (const FPLYProperty& Prop : VertexProperties)
+	{
+		if (Prop.Name == TEXT("x")) OffsetX = Prop.Offset;
+		else if (Prop.Name == TEXT("y")) OffsetY = Prop.Offset;
+		else if (Prop.Name == TEXT("z")) OffsetZ = Prop.Offset;
+		else if (Prop.Name == TEXT("red")) OffsetR = Prop.Offset;
+		else if (Prop.Name == TEXT("green")) OffsetG = Prop.Offset;
+		else if (Prop.Name == TEXT("blue")) OffsetB = Prop.Offset;
+	}
+
+	TArray<FLidarPointCloudPoint> Points;
+	Points.AddUninitialized(VertexCount);
+
+	// Extract points using the dynamically mapped offsets
+	if (bIsBinary)
+	{
+		const uint8* DataPtr = Blob.GetData() + DataStartIndex;
+		int64 MaxDataLen = Blob.Num() - DataStartIndex;
+
+		if (MaxDataLen < VertexCount * VertexStride)
+		{
+			return nullptr;
+		}
+
+		for (int64 Index = 0; Index < VertexCount; Index++)
+		{
+			FLidarPointCloudPoint Point;
+			const uint8* PointPtr = DataPtr + (Index * VertexStride);
+
+			if (OffsetX > -1) Point.Location.X = *reinterpret_cast<const float*>(PointPtr + OffsetX);
+			if (OffsetY > -1) Point.Location.Y = *reinterpret_cast<const float*>(PointPtr + OffsetY);
+			if (OffsetZ > -1) Point.Location.Z = *reinterpret_cast<const float*>(PointPtr + OffsetZ);
+
+			if (OffsetR > -1) Point.Color.R = *(PointPtr + OffsetR);
+			if (OffsetG > -1) Point.Color.G = *(PointPtr + OffsetG);
+			if (OffsetB > -1) Point.Color.B = *(PointPtr + OffsetB);
+			Point.Color.A = 255;
+
+			Points[Index] = MoveTemp(Point);
+		}
+	}
+	else
+	{
+		int64 CurrentIndex = DataStartIndex;
+		for (int64 Index = 0; Index < VertexCount; Index++)
+		{
+			int64 LineStart = CurrentIndex;
+			while (CurrentIndex < Blob.Num() && Blob[CurrentIndex] != '\n' && Blob[CurrentIndex] != '\r')
+			{
+				CurrentIndex++;
+			}
+
+			FString Line(CurrentIndex - LineStart, reinterpret_cast<const ANSICHAR*>(Blob.GetData() + LineStart));
+
+			while (CurrentIndex < Blob.Num() && (Blob[CurrentIndex] == '\n' || Blob[CurrentIndex] == '\r'))
+			{
+				CurrentIndex++;
+			}
+
+			TArray<FString> Tokens;
+			Line.ParseIntoArrayWS(Tokens);
+
+			FLidarPointCloudPoint Point;
+			for (int32 PropIdx = 0; PropIdx < VertexProperties.Num() && PropIdx < Tokens.Num(); PropIdx++)
+			{
+				const FPLYProperty& Prop = VertexProperties[PropIdx];
+				if (Prop.Name == TEXT("x")) Point.Location.X = FCString::Atof(*Tokens[PropIdx]);
+				else if (Prop.Name == TEXT("y")) Point.Location.Y = FCString::Atof(*Tokens[PropIdx]);
+				else if (Prop.Name == TEXT("z")) Point.Location.Z = FCString::Atof(*Tokens[PropIdx]);
+				else if (Prop.Name == TEXT("red")) Point.Color.R = FCString::Atoi(*Tokens[PropIdx]);
+				else if (Prop.Name == TEXT("green")) Point.Color.G = FCString::Atoi(*Tokens[PropIdx]);
+				else if (Prop.Name == TEXT("blue")) Point.Color.B = FCString::Atoi(*Tokens[PropIdx]);
+			}
+			Point.Color.A = 255;
+			Points[Index] = MoveTemp(Point);
+		}
+	}
+
+	return ULidarPointCloud::CreateFromData(Points, false);
+}

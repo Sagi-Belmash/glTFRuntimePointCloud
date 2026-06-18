@@ -82,6 +82,9 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "glTFRuntime|PointCloud", meta = (AutoCreateRefTerm = "ASCIIPointCloudConfig"))
 	static ULidarPointCloud* LoadPointCloudFromPCD(UglTFRuntimeAsset* Asset, FTransform& ViewPoint);
 
+	UFUNCTION(BlueprintCallable, Category = "glTFRuntime|PointCloud")
+	static ULidarPointCloud* LoadPointCloudFromPLY(UglTFRuntimeAsset* Asset);
+
 	static ULidarPointCloud* LoadPointCloudFromXYZWithFilter(UglTFRuntimeAsset* Asset, TFunction<void(FLidarPointCloudPoint&, const TArray<FString>&, const FglTFRuntimeASCIIPointCloudConfig&) > StringFilter, TFunction<void(FLidarPointCloudPoint&, const TArray<double>&, const TArray<double>&, const TArray<double>&, const FglTFRuntimeASCIIPointCloudConfig&)> FloatFilter, const FglTFRuntimeASCIIPointCloudConfig& ASCIIPointCloudConfig);
 
 };
